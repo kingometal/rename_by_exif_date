@@ -1,0 +1,254 @@
+#!/bin/bash -l
+# Written by Igor Beljakov igor.beljakov@gmx.de
+
+##################
+# This script takes a list of files as arguments
+# and appends a prefix to the filename, which contains the date and time from the exif data
+# 
+#
+
+
+##################
+# default settings
+##################
+
+SHOW_ERROR_STRING=0
+SHOW_SKIPPED_FILES=1
+SHOW_ERRORS=1
+DRY_RUN=1
+ERROR_LOG_FILE_NAME="/tmp/rename_by_exif_date.err"
+ERROR_UNFORMATTED_LOG_FILE_NAME="/tmp/rename_by_exif_date_not_formatted.err"
+SILENT=0
+USE_ORIGINAL_DATE=1
+
+
+####################
+# Temporary variable 
+####################
+
+INPUT_FILES=()
+
+if [[ $# -eq 0 ]]; then
+echo ""
+echo "This script takes a list of files as arguments and appends a prefix to the filename, which contains the date and time from the exif data"
+echo ""
+echo "The prefix format is YYYYMMDD-hhmmss_"
+echo ""
+echo "usage: $0 [Options] Filename1 Filename2 Filename3..."
+echo ""
+echo "Options:"
+echo "  -d or --dry-run"
+echo "    -d 1 enables dry run, which means, no data is actully written, and no files are renamed"
+echo "    -d 0 disables dry run. This option is needed to actually rename files."
+echo "    default is -d 1"
+echo "  -s"
+echo "    silent mode: no user confirmations are required"
+echo "  -se or --show-errors"
+echo "    -se 0 disables messages when a file can not be renamed. Default is 1"
+echo "  -ss or --show-skipped"
+echo "    -ss 0 disables messages when a file was not renamed because it was skipped. A file is usually skipped if it already has the date-time-prefix, or it contains exif data which is full of zeroes, meaning the date and time were not set on the camera"
+
+fi
+
+EXIF_PATH=$(which exif)
+if [ "$EXIF_PATH" == "" ]; then
+	echo "Exif not found. Please install exif first:"
+	echo "sudo apt-get install exif"
+	echo "stopping execution"
+	exit -1
+fi
+
+##############################
+# Read command line parameters
+##############################
+while [[ $# -gt 0 ]]; do
+ key=$1
+ case $key in 
+      -s|--silent)
+      SILENT=1
+      shift #past argument
+      ;;
+      -d|--dry-run)
+      if [ "$2" -eq "1" ] || [ "$2" == "0" ]; then
+	      DRY_RUN=$2
+      else
+          echo Invalid argument. Argument for -d or --dry-run should be 0 or 1;
+          exit 1;
+      fi
+      shift #past argument
+      shift #past value
+      ;;
+      -se|--show-errors)
+      if [ "$2" -eq "1" ] || [ "$2" == "0" ]; then
+              SHOW_ERRORS=$2
+      else
+          echo Invalid argument. Argument for -se or --show-errors should be 0 or 1;
+          exit 1;
+      fi
+      shift
+      shift
+      ;;
+      -ses|--show-error-string)
+          SHOW_ERROR_STRING=1
+      shift
+      ;;
+      -ss|--show-skipped)
+      if [ "$2" -eq "1" ] || [ "$2" == "0" ]; then
+              SHOW_SKIPPED_FILES=$2
+      else
+          echo Invalid argument. Argument for -ss or --show-skipped should be 0 or 1;
+          exit 1;
+      fi
+      shift
+      shift
+      ;;
+      *)
+      INPUT_FILES+=("$1")
+      shift
+      ;;
+ esac
+ done
+set -- "${INPUT_FILES[@]}"
+
+
+##################################################################
+# Check if user is sure that changes should be written permanently
+##################################################################
+
+if [ $DRY_RUN -eq "1" ]; then 
+    echo "Dry run enabled"; 
+else 
+    echo "Dry run disabled"; 
+    if [ $SILENT -ne "1" ]; then 
+        echo Files will be permanently renamed. Press \"y\" if you are sure.
+        read -rsn1 input
+        if [ "$input" != "y" ]; then
+            exit 1;
+        fi
+    fi
+fi
+
+##################
+#internal variable
+##################
+
+ERROR_OCCURED=0
+
+
+
+##############################
+# Remove log file if it exists
+##############################
+if [ -e $ERROR_LOG_FILE_NAME ]; then
+    rm $ERROR_LOG_FILE_NAME;
+fi
+
+if [ -e $ERROR_UNFORMATTED_LOG_FILE_NAME ]; then
+    rm $ERROR_UNFORMATTED_LOG_FILE_NAME;
+fi
+
+
+
+######################################################
+# Do the job (rename files according to the exif data)
+######################################################
+
+for i in "$@"; do 
+    if [ -d "$i" ]; then 
+        ### Skip folders
+        if [ $SHOW_SKIPPED_FILES -eq 1 ]; then
+            echo "$i is a folder. Skipping."
+        fi
+    elif [ ! -f "$i" ]; then 
+        ### Check that the source file exists 
+        echo -e "File \033[00;31m$i\033[0m does not exist"
+    else 
+
+        ### Try to get exif date and time
+
+#        if result=$( { exif "$i" | grep -m 1 "Date and Time       "; } 2>&1); then
+        if result=$( { exif "$i" | grep -m 1 "Date and Time (Ori"; } 2>&1); then
+            
+            ### generate a new prefix for the  file name
+
+            newPrefix=$(echo $result | awk -F'|' '{print $2}' | sed 's@:@@g' | sed 's@ @_@g') ; 
+
+            ### check if the filename already contains that prefix. Skip file if so
+
+	    if [[ $(basename "$i") == ${newPrefix}* ]]; then
+                if [ $SHOW_SKIPPED_FILES -eq 1 ]; then
+                    echo -e "\033[00;33m$i\033[0m: File name already contains the date and time. Skipped";
+                fi
+
+            ### check if exif data contains zero time and date. That is the case when the time and date are not set. Skip file if so.
+
+            elif [[ $newPrefix == "00000000_000000" ]]; then
+                if [ $SHOW_ERRORS -eq 1 ]; then
+                    echo -e "\033[00;31m$i\033[0m: Camera date and time were not set correctly. Skipped";
+                fi
+            else
+
+                ### generate a new file name
+
+                newCompleteFilePath="$(dirname "$i")/${newPrefix}_$(basename "$i")"
+
+                ### check if a file already exists with a new file name. If so, add a (some_number) after the prefix and try again
+
+                counter=0;
+                while [[ -f $newCompleteFilePath ]] ; do
+                        echo path $newCompleteFilePath already exists;
+			newPrefixWithCounter="${newPrefix}($counter)"
+                        echo taking new file name $newPrefixWithCounter
+                        newCompleteFilePath="$(dirname "$i")/${newPrefixWithCounter}_$(basename "$i")"
+                        let counter=$counter+1
+                done
+
+                ### now we are sure that we will not overwrite another file
+                 
+                if [ $DRY_RUN -eq "1" ]; then
+
+                    ### print message about what we would do if it was not a dry run
+
+                    echo -e "\033[00;32m$i\033[0m: would be renamed to \033[00;32m${newCompleteFilePath}\033[0m"
+                else
+
+                    ### rename the file. Now or never!
+
+                    if mv -n "$i" "${newCompleteFilePath}" ; then
+                        echo -e "\033[00;32m$i\033[0m: renamed to \033[00;32m${newCompleteFilePath}\033[0m"
+                    else
+                        echo -e "\033[00;31m$i\033[0m: rename to \033[00;32m${newCompleteFilePath}\033[0m failed"
+                        ### this really should not happen, that's why we better exit here
+                        exit 1;
+                    fi
+                fi
+            fi
+        else
+            ### write error into log
+
+            error=$result
+            if [ $SHOW_ERRORS -eq 1 ]; then
+                echo -e "\033[00;31m$i\033[0m: Error getting exif information.";
+            fi
+            echo -e "\033[00;31m$i\033[0m: Error getting exif information: $error" >> $ERROR_LOG_FILE_NAME;
+            echo -e "${i}: Error getting exif information: $error" >> $ERROR_UNFORMATTED_LOG_FILE_NAME;
+            ERROR_OCCURED=1
+        fi
+    fi
+done
+
+
+### if an error occured while reading exif data, the user can see them. He gets an opportunity to do it right now by pressing 'y'
+
+if [ ! $ERROR_OCCURED -eq "0" ]; then
+    echo "Some files could not be renamed. See $ERROR_LOG_FILE_NAME or $ERROR_UNFORMATTED_LOG_FILE_NAME for details."
+    if [ $SILENT -ne 1 ] && [ $SHOW_ERROR_STRING -eq 1 ] ; then
+        echo Press \"y\" if you would like to see the content of $ERROR_LOG_FILE_NAME
+        read -rsn1 input
+        if [ "$input" = "y" ]; then
+            cat $ERROR_LOG_FILE_NAME
+            break
+        fi
+    fi
+fi
+
